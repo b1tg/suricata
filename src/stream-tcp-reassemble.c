@@ -195,7 +195,7 @@ int StreamTcpReassembleSetMemcap(uint64_t size)
  *
  *  \return memcap memcap value
  */
-uint64_t StreamTcpReassembleGetMemcap()
+uint64_t StreamTcpReassembleGetMemcap(void)
 {
     uint64_t memcapcopy = SC_ATOMIC_GET(stream_config.reassembly_memcap);
     return memcapcopy;
@@ -223,13 +223,16 @@ static void *ReassembleCalloc(size_t n, size_t size)
 void *StreamTcpReassembleRealloc(void *optr, size_t orig_size, size_t size)
 {
     if (size > orig_size) {
-        if (StreamTcpReassembleCheckMemcap(size - orig_size) == 0)
+        if (StreamTcpReassembleCheckMemcap(size - orig_size) == 0) {
+            SCLogDebug("memcap hit at %" PRIu64, SC_ATOMIC_GET(stream_config.reassembly_memcap));
             return NULL;
+        }
     }
     void *nptr = SCRealloc(optr, size);
-    if (nptr == NULL)
+    if (nptr == NULL) {
+        SCLogDebug("realloc fail");
         return NULL;
-
+    }
     if (size > orig_size) {
         StreamTcpReassembleIncrMemuse(size - orig_size);
     } else {
@@ -250,6 +253,7 @@ static void ReassembleFree(void *ptr, size_t size)
 /** \brief alloc a tcp segment pool entry */
 static void *TcpSegmentPoolAlloc(void)
 {
+    SCLogDebug("segment alloc");
     if (StreamTcpReassembleCheckMemcap((uint32_t)sizeof(TcpSegment)) == 0) {
         return NULL;
     }
@@ -409,7 +413,7 @@ uint64_t StreamTcpGetAcked(const TcpStream *stream)
 
 uint64_t StreamTcpGetUsable(const TcpStream *stream, const bool eof)
 {
-    uint64_t right_edge = STREAM_BASE_OFFSET(stream) + stream->sb.buf_offset;
+    uint64_t right_edge = StreamingBufferGetConsecutiveDataRightEdge(&stream->sb);
     if (!eof && StreamTcpInlineMode() == FALSE) {
         right_edge = MIN(GetAbsLastAck(stream), right_edge);
     }
@@ -480,7 +484,23 @@ static int StreamTcpReassemblyConfig(bool quiet)
         StreamTcpReassembleConfigEnableOverlapCheck();
     }
 
+    uint16_t max_regions = 8;
+    ConfNode *mr = ConfGetNode("stream.reassembly.max-regions");
+    if (mr) {
+        uint16_t max_r = 0;
+        if (StringParseUint16(&max_r, 10, (uint16_t)strlen(mr->val), mr->val) < 0) {
+            SCLogError("max-regions %s is invalid", mr->val);
+            return -1;
+        }
+        max_regions = max_r;
+    }
+    if (!quiet)
+        SCLogConfig("stream.reassembly \"max-regions\": %u", max_regions);
+
+    stream_config.prealloc_segments = segment_prealloc;
     stream_config.sbcnf.buf_size = 2048;
+    stream_config.sbcnf.max_regions = max_regions;
+    stream_config.sbcnf.region_gap = STREAMING_BUFFER_REGION_GAP_DEFAULT;
     stream_config.sbcnf.Calloc = ReassembleCalloc;
     stream_config.sbcnf.Realloc = StreamTcpReassembleRealloc;
     stream_config.sbcnf.Free = ReassembleFree;
@@ -682,10 +702,10 @@ static uint32_t StreamTcpReassembleCheckDepth(TcpSession *ssn, TcpStream *stream
 uint32_t StreamDataAvailableForProtoDetect(TcpStream *stream)
 {
     if (RB_EMPTY(&stream->sb.sbb_tree)) {
-        if (stream->sb.stream_offset != 0)
+        if (stream->sb.region.stream_offset != 0)
             return 0;
 
-        return stream->sb.buf_offset;
+        return stream->sb.region.buf_offset;
     } else {
         DEBUG_VALIDATE_BUG_ON(stream->sb.head == NULL);
         DEBUG_VALIDATE_BUG_ON(stream->sb.sbb_size == 0);
@@ -895,7 +915,6 @@ uint8_t StreamNeedsReassembly(const TcpSession *ssn, uint8_t direction)
         dirstr = "server";
 #endif
     }
-
     int use_app = 1;
     int use_raw = 1;
 
@@ -908,21 +927,24 @@ uint8_t StreamNeedsReassembly(const TcpSession *ssn, uint8_t direction)
         // raw is dead
         use_raw = 0;
     }
-
-    uint64_t right_edge = STREAM_BASE_OFFSET(stream) + stream->sb.buf_offset;
-
-    SCLogDebug("%s: app %"PRIu64" (use: %s), raw %"PRIu64" (use: %s). Stream right edge: %"PRIu64,
-            dirstr,
-            STREAM_APP_PROGRESS(stream), use_app ? "yes" : "no",
-            STREAM_RAW_PROGRESS(stream), use_raw ? "yes" : "no",
-            right_edge);
     if (use_raw) {
+        const uint64_t right_edge =
+                STREAM_BASE_OFFSET(stream) + stream->segs_right_edge - stream->base_seq;
+        SCLogDebug("%s: app %" PRIu64 " (use: %s), raw %" PRIu64
+                   " (use: %s). Stream right edge: %" PRIu64,
+                dirstr, STREAM_APP_PROGRESS(stream), use_app ? "yes" : "no",
+                STREAM_RAW_PROGRESS(stream), use_raw ? "yes" : "no", right_edge);
         if (right_edge > STREAM_RAW_PROGRESS(stream)) {
             SCLogDebug("%s: STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION", dirstr);
             return STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
         }
     }
     if (use_app) {
+        const uint64_t right_edge = StreamingBufferGetConsecutiveDataRightEdge(&stream->sb);
+        SCLogDebug("%s: app %" PRIu64 " (use: %s), raw %" PRIu64
+                   " (use: %s). Stream right edge: %" PRIu64,
+                dirstr, STREAM_APP_PROGRESS(stream), use_app ? "yes" : "no",
+                STREAM_RAW_PROGRESS(stream), use_raw ? "yes" : "no", right_edge);
         if (right_edge > STREAM_APP_PROGRESS(stream)) {
             SCLogDebug("%s: STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION", dirstr);
             return STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
@@ -942,7 +964,7 @@ static uint64_t GetStreamSize(TcpStream *stream)
         uint64_t last_ack_abs = GetAbsLastAck(stream);
         uint64_t last_re = 0;
 
-        SCLogDebug("stream_offset %" PRIu64, stream->sb.stream_offset);
+        SCLogDebug("stream_offset %" PRIu64, stream->sb.region.stream_offset);
 
         TcpSegment *seg;
         RB_FOREACH(seg, TCPSEG, &stream->seg_tree) {
@@ -998,7 +1020,7 @@ static void GetSessionSize(TcpSession *ssn, Packet *p)
 }
 #endif
 
-static StreamingBufferBlock *GetBlock(StreamingBuffer *sb, const uint64_t offset)
+static StreamingBufferBlock *GetBlock(const StreamingBuffer *sb, const uint64_t offset)
 {
     StreamingBufferBlock *blk = sb->head;
     if (blk == NULL)
@@ -1014,7 +1036,7 @@ static StreamingBufferBlock *GetBlock(StreamingBuffer *sb, const uint64_t offset
     return NULL;
 }
 
-static inline bool GapAhead(TcpStream *stream, StreamingBufferBlock *cur_blk)
+static inline bool GapAhead(const TcpStream *stream, StreamingBufferBlock *cur_blk)
 {
     StreamingBufferBlock *nblk = SBB_RB_NEXT(cur_blk);
     if (nblk && (cur_blk->offset + cur_blk->len < nblk->offset) &&
@@ -1033,7 +1055,7 @@ static inline bool GapAhead(TcpStream *stream, StreamingBufferBlock *cur_blk)
  *  \param check_for_gap check if there is a gap ahead. Optional as it is only
  *                       needed for app-layer incomplete support.
  *  \retval bool pkt loss ahead */
-static bool GetAppBuffer(TcpStream *stream, const uint8_t **data, uint32_t *data_len,
+static bool GetAppBuffer(const TcpStream *stream, const uint8_t **data, uint32_t *data_len,
         uint64_t offset, const bool check_for_gap)
 {
     const uint8_t *mydata;
@@ -1048,6 +1070,7 @@ static bool GetAppBuffer(TcpStream *stream, const uint8_t **data, uint32_t *data
         *data = mydata;
         *data_len = mydata_len;
     } else {
+        SCLogDebug("block mode");
         StreamingBufferBlock *blk = GetBlock(&stream->sb, offset);
         if (blk == NULL) {
             *data = NULL;
@@ -1058,8 +1081,10 @@ static bool GetAppBuffer(TcpStream *stream, const uint8_t **data, uint32_t *data
 
         /* block at expected offset */
         if (blk->offset == offset) {
+            SCLogDebug("blk at offset");
 
             StreamingBufferSBBGetData(&stream->sb, blk, data, data_len);
+            BUG_ON(blk->len != *data_len);
 
             gap_ahead = check_for_gap && GapAhead(stream, blk);
 
@@ -1184,8 +1209,11 @@ static int ReassembleUpdateAppLayer (ThreadVars *tv,
     uint64_t app_progress = STREAM_APP_PROGRESS(*stream);
 
     SCLogDebug("app progress %"PRIu64, app_progress);
-    SCLogDebug("last_ack %u, base_seq %u", (*stream)->last_ack, (*stream)->base_seq);
-
+#ifdef DEBUG
+    uint64_t last_ack_abs = GetAbsLastAck(*stream);
+    SCLogDebug("last_ack %u (abs %" PRIu64 "), base_seq %u", (*stream)->last_ack, last_ack_abs,
+            (*stream)->base_seq);
+#endif
     const uint8_t *mydata;
     uint32_t mydata_len;
     bool last_was_gap = false;
@@ -1195,6 +1223,7 @@ static int ReassembleUpdateAppLayer (ThreadVars *tv,
         bool check_for_gap_ahead = ((*stream)->data_required > 0);
         bool gap_ahead =
                 GetAppBuffer(*stream, &mydata, &mydata_len, app_progress, check_for_gap_ahead);
+        SCLogDebug("gap_ahead %s mydata_len %u", BOOL2STR(gap_ahead), mydata_len);
         if (last_was_gap && mydata_len == 0) {
             break;
         }
@@ -1237,11 +1266,13 @@ static int ReassembleUpdateAppLayer (ThreadVars *tv,
             continue;
 
         } else if (flags & STREAM_DEPTH) {
+            SCLogDebug("DEPTH");
             // we're just called once with this flag, so make sure we pass it on
             if (mydata == NULL && mydata_len > 0) {
                 mydata_len = 0;
             }
         } else if (mydata == NULL || (mydata_len == 0 && ((flags & STREAM_EOF) == 0))) {
+            SCLogDebug("GAP?1");
             /* Possibly a gap, but no new data. */
             if ((p->flags & PKT_PSEUDO_STREAM_END) == 0 || ssn->state < TCP_CLOSED)
                 SCReturnInt(0);
@@ -1257,7 +1288,9 @@ static int ReassembleUpdateAppLayer (ThreadVars *tv,
                 *stream, &(*stream)->sb, mydata_len, app_progress);
 
         if ((p->flags & PKT_PSEUDO_STREAM_END) == 0 || ssn->state < TCP_CLOSED) {
+            SCLogDebug("GAP?2");
             if (mydata_len < (*stream)->data_required) {
+                SCLogDebug("GAP?3 gap_head %s", BOOL2STR(gap_ahead));
                 if (gap_ahead) {
                     SCLogDebug("GAP while expecting more data (expect %u, gap size %u)",
                             (*stream)->data_required, mydata_len);
@@ -1274,6 +1307,7 @@ static int ReassembleUpdateAppLayer (ThreadVars *tv,
         }
         (*stream)->data_required = 0;
 
+        SCLogDebug("parser");
         /* update the app-layer */
         (void)AppLayerHandleTCPData(tv, ra_ctx, p, p->flow, ssn, stream,
                 (uint8_t *)mydata, mydata_len, flags);
@@ -1433,7 +1467,9 @@ bool StreamReassembleRawHasDataReady(TcpSession *ssn, Packet *p)
         return false;
 
     if (StreamTcpInlineMode() == FALSE) {
-        if ((STREAM_RAW_PROGRESS(stream) == STREAM_BASE_OFFSET(stream) + stream->sb.buf_offset)) {
+        const uint64_t segs_re_abs =
+                STREAM_BASE_OFFSET(stream) + stream->segs_right_edge - stream->base_seq;
+        if (STREAM_RAW_PROGRESS(stream) == segs_re_abs) {
             return false;
         }
         if (StreamTcpReassembleRawCheckLimit(ssn, stream, p) == 1) {
@@ -1497,7 +1533,7 @@ void StreamReassembleRawUpdateProgress(TcpSession *ssn, Packet *p, uint64_t prog
     /* app is dead */
     } else if (progress == 0) {
         uint64_t tcp_window = stream->window;
-        uint64_t stream_right_edge = STREAM_BASE_OFFSET(stream) + stream->sb.buf_offset;
+        const uint64_t stream_right_edge = StreamingBufferGetConsecutiveDataRightEdge(&stream->sb);
         if (tcp_window < stream_right_edge) {
             uint64_t new_raw = stream_right_edge - tcp_window;
             if (new_raw > STREAM_RAW_PROGRESS(stream)) {
@@ -2186,6 +2222,63 @@ static int VALIDATE(TcpStream *stream, uint8_t *data, uint32_t data_len)
     StreamTcpUTAddPayload(&tv, ra_ctx, &ssn, stream, (seq), (uint8_t *)(seg), (seglen));    \
     FAIL_IF(!(VALIDATE(stream, (uint8_t *)(buf), (buflen))));
 
+#define MISSED_ADD_PAYLOAD(seq, seg, seglen)                                                       \
+    StreamTcpUTAddPayload(&tv, ra_ctx, &ssn, stream, (seq), (uint8_t *)(seg), (seglen));
+
+int UTHCheckGapAtPostion(TcpStream *stream, int pos, uint64_t offset, uint32_t len);
+
+int UTHCheckGapAtPostion(TcpStream *stream, int pos, uint64_t offset, uint32_t len)
+{
+    int cnt = 0;
+    uint64_t last_re = 0;
+    StreamingBufferBlock *sbb = NULL;
+    RB_FOREACH(sbb, SBB, &stream->sb.sbb_tree)
+    {
+        if (sbb->offset != last_re) {
+            // gap before us
+            if (cnt == pos && last_re == offset && len == sbb->offset - last_re) {
+                return 1;
+            }
+            cnt++;
+        }
+        last_re = sbb->offset + sbb->len;
+        cnt++;
+    }
+    return 0;
+}
+
+int UTHCheckDataAtPostion(
+        TcpStream *stream, int pos, uint64_t offset, const char *data, uint32_t len);
+
+int UTHCheckDataAtPostion(
+        TcpStream *stream, int pos, uint64_t offset, const char *data, uint32_t len)
+{
+    int cnt = 0;
+    uint64_t last_re = 0;
+    StreamingBufferBlock *sbb = NULL;
+    RB_FOREACH(sbb, SBB, &stream->sb.sbb_tree)
+    {
+        if (sbb->offset != last_re) {
+            // gap before us
+            cnt++;
+        }
+
+        if (cnt == pos && sbb->offset == offset) {
+            const uint8_t *buf = NULL;
+            uint32_t buf_len = 0;
+            StreamingBufferSBBGetData(&stream->sb, sbb, &buf, &buf_len);
+
+            if (len == buf_len) {
+                return (memcmp(data, buf, len) == 0);
+            }
+        }
+
+        last_re = sbb->offset + sbb->len;
+        cnt++;
+    }
+    return 0;
+}
+
 /**
  *  \test   Test the handling of packets missed by both IDS and the end host.
  *          The packet is missed in the starting of the stream.
@@ -2196,10 +2289,15 @@ static int VALIDATE(TcpStream *stream, uint8_t *data, uint32_t data_len)
 static int StreamTcpReassembleTest25 (void)
 {
     MISSED_START(6);
-    MISSED_STEP(10, "BB", 2, "\0\0\0BB", 5);
-    MISSED_STEP(12, "CC", 2, "\0\0\0BBCC", 7);
+    MISSED_ADD_PAYLOAD(10, "BB", 2);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 0, 0, 3) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 1, 3, "BB", 2) == 1);
+    MISSED_ADD_PAYLOAD(12, "CC", 2);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 0, 0, 3) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 1, 3, "BBCC", 4) == 1);
     MISSED_STEP(7, "AAA", 3, "AAABBCC", 7);
     MISSED_END;
+    PASS;
 }
 
 /**
@@ -2213,7 +2311,10 @@ static int StreamTcpReassembleTest26 (void)
 {
     MISSED_START(9);
     MISSED_STEP(10, "AAA", 3, "AAA", 3);
-    MISSED_STEP(15, "CC", 2, "AAA\0\0CC", 7);
+    MISSED_ADD_PAYLOAD(15, "CC", 2);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 0, 0, "AAA", 3) == 1);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 1, 3, 2) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 2, 5, "CC", 2) == 1);
     MISSED_STEP(13, "BB", 2, "AAABBCC", 7);
     MISSED_END;
 }
@@ -2245,10 +2346,16 @@ static int StreamTcpReassembleTest27 (void)
 static int StreamTcpReassembleTest28 (void)
 {
     MISSED_START(6);
-    MISSED_STEP(10, "AAA", 3, "\0\0\0AAA", 6);
-    MISSED_STEP(13, "BB", 2, "\0\0\0AAABB", 8);
+    MISSED_ADD_PAYLOAD(10, "AAA", 3);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 0, 0, 3) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 1, 3, "AAA", 3) == 1);
+    MISSED_ADD_PAYLOAD(13, "BB", 2);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 0, 0, 3) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 1, 3, "AAABB", 5) == 1);
     ssn.state = TCP_TIME_WAIT;
-    MISSED_STEP(15, "CC", 2, "\0\0\0AAABBCC", 10);
+    MISSED_ADD_PAYLOAD(15, "CC", 2);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 0, 0, 3) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 1, 3, "AAABBCC", 7) == 1);
     MISSED_END;
 }
 
@@ -2265,7 +2372,10 @@ static int StreamTcpReassembleTest29 (void)
     MISSED_START(9);
     MISSED_STEP(10, "AAA", 3, "AAA", 3);
     ssn.state = TCP_TIME_WAIT;
-    MISSED_STEP(15, "CC", 2, "AAA\0\0CC", 7);
+    MISSED_ADD_PAYLOAD(15, "CC", 2);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 0, 0, "AAA", 3) == 1);
+    FAIL_IF_NOT(UTHCheckGapAtPostion(stream, 1, 3, 2) == 1);
+    FAIL_IF_NOT(UTHCheckDataAtPostion(stream, 2, 5, "CC", 2) == 1);
     MISSED_END;
 }
 

@@ -645,6 +645,7 @@ static AppLayerResult FTPParseRequest(Flow *f, void *ftp_state, AppLayerParserSt
                             FTPFree(state->port_line, state->port_line_size);
                             state->port_line = NULL;
                             state->port_line_size = 0;
+                            state->port_line_len = 0;
                         }
                         SCReturnStruct(APP_LAYER_OK);
                     }
@@ -1161,7 +1162,7 @@ static AppLayerResult FTPDataParse(Flow *f, FtpDataState *ftpdata_state,
             SCReturnStruct(APP_LAYER_OK);
         }
         if (input_len != 0) {
-            ret = FileAppendData(ftpdata_state->files, input, input_len);
+            ret = FileAppendData(ftpdata_state->files, &sbcfg, input, input_len);
             if (ret == -2) {
                 ret = 0;
                 SCLogDebug("FileAppendData() - file no longer being extracted");
@@ -1176,7 +1177,7 @@ static AppLayerResult FTPDataParse(Flow *f, FtpDataState *ftpdata_state,
 
     BUG_ON((direction & ftpdata_state->direction) == 0); // should be unreachble
     if (eof) {
-        ret = FileCloseFile(ftpdata_state->files, NULL, 0, flags);
+        ret = FileCloseFile(ftpdata_state->files, &sbcfg, NULL, 0, flags);
         ftpdata_state->state = FTPDATA_STATE_FINISHED;
         SCLogDebug("closed because of eof");
     }
@@ -1234,7 +1235,7 @@ static void FTPDataStateFree(void *s)
         FTPFree(fstate->file_name, fstate->file_len + 1);
     }
 
-    FileContainerFree(fstate->files);
+    FileContainerFree(fstate->files, &sbcfg);
 
     FTPFree(s, sizeof(FtpDataState));
 #ifdef DEBUG
@@ -1283,14 +1284,15 @@ static int FTPDataGetAlstateProgress(void *tx, uint8_t direction)
         return FTPDATA_STATE_FINISHED;
 }
 
-static FileContainer *FTPDataStateGetTxFiles(void *tx, uint8_t direction)
+static AppLayerGetFileState FTPDataStateGetTxFiles(void *_state, void *tx, uint8_t direction)
 {
     FtpDataState *ftpdata_state = (FtpDataState *)tx;
+    AppLayerGetFileState files = { .fc = NULL, .cfg = &sbcfg };
 
-    if (direction != ftpdata_state->direction)
-        SCReturnPtr(NULL, "FileContainer");
+    if (direction == ftpdata_state->direction)
+        files.fc = ftpdata_state->files;
 
-    SCReturnPtr(ftpdata_state->files, "FileContainer");
+    return files;
 }
 
 static void FTPSetMpmState(void)

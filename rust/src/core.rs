@@ -152,6 +152,7 @@ pub enum HttpRangeContainerBlock {}
 pub type SCHttpRangeFreeBlock = extern "C" fn (
         c: *mut HttpRangeContainerBlock);
 pub type SCHTPFileCloseHandleRange = extern "C" fn (
+        sbcfg: &StreamingBufferConfig,
         fc: *mut FileContainer,
         flags: u16,
         c: *mut HttpRangeContainerBlock,
@@ -166,21 +167,23 @@ pub type SCFileOpenFileWithId = extern "C" fn (
         flags: u16) -> i32;
 pub type SCFileCloseFileById = extern "C" fn (
         file_container: &FileContainer,
+        sbcfg: &StreamingBufferConfig,
         track_id: u32,
         data: *const u8, data_len: u32,
         flags: u16) -> i32;
 pub type SCFileAppendDataById = extern "C" fn (
         file_container: &FileContainer,
+        sbcfg: &StreamingBufferConfig,
         track_id: u32,
         data: *const u8, data_len: u32) -> i32;
 pub type SCFileAppendGAPById = extern "C" fn (
         file_container: &FileContainer,
+        sbcfg: &StreamingBufferConfig,
         track_id: u32,
         data: *const u8, data_len: u32) -> i32;
-pub type SCFilePrune = extern "C" fn (
-        file_container: &FileContainer);
 pub type SCFileContainerRecycle = extern "C" fn (
-        file_container: &FileContainer);
+        file_container: &FileContainer,
+        sbcfg: &StreamingBufferConfig);
 
 // A Suricata context that is passed in from C. This is alternative to
 // using functions from Suricata directly, so they can be wrapped so
@@ -206,7 +209,6 @@ pub struct SuricataContext {
     pub FileAppendData: SCFileAppendDataById,
     pub FileAppendGAP: SCFileAppendGAPById,
     pub FileContainerRecycle: SCFileContainerRecycle,
-    pub FilePrune: SCFilePrune,
 
     pub AppLayerRegisterParser: extern fn(parser: *const crate::applayer::RustParser, alproto: AppProto) -> std::os::raw::c_int,
 }

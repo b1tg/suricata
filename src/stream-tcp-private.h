@@ -100,8 +100,8 @@ RB_PROTOTYPE(TCPSEG, TcpSegment, rb, TcpSegmentCompare);
  * Only use if STREAM_HAS_SEEN_DATA is true. */
 #define STREAM_SEQ_RIGHT_EDGE(stream)   (stream)->segs_right_edge
 #define STREAM_RIGHT_EDGE(stream)       (STREAM_BASE_OFFSET((stream)) + (STREAM_SEQ_RIGHT_EDGE((stream)) - (stream)->base_seq))
-/* return true if we have seen data segments. */
-#define STREAM_HAS_SEEN_DATA(stream)    (!RB_EMPTY(&(stream)->sb.sbb_tree) || (stream)->sb.stream_offset || (stream)->sb.buf_offset)
+/* return true if we have seen data. */
+#define STREAM_HAS_SEEN_DATA(stream) StreamingBufferHasData(&(stream)->sb)
 
 typedef struct TcpStream_ {
     uint16_t flags:12;              /**< Flag specific to the stream e.g. Timestamp */
@@ -140,7 +140,7 @@ typedef struct TcpStream_ {
     struct TCPSACK sack_tree;       /**< red back tree of TCP SACK records. */
 } TcpStream;
 
-#define STREAM_BASE_OFFSET(stream)  ((stream)->sb.stream_offset)
+#define STREAM_BASE_OFFSET(stream)  ((stream)->sb.region.stream_offset)
 #define STREAM_APP_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->app_progress_rel)
 #define STREAM_RAW_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->raw_progress_rel)
 #define STREAM_LOG_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->log_progress_rel)

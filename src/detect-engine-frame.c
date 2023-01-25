@@ -95,7 +95,7 @@ static void PrefilterMpmFrame(DetectEngineThreadCtx *det_ctx, const void *pectx,
     const uint8_t *data = buffer->inspect;
 
     SCLogDebug("mpm'ing buffer:");
-    // SCLogDebug("frame: %p", frame);
+    SCLogDebug("frame: %p", frame);
     // PrintRawDataFp(stdout, data, MIN(32, data_len));
 
     if (data != NULL && data_len >= mpm_ctx->minlen) {
@@ -166,26 +166,30 @@ static InspectionBuffer *DetectFrame2InspectBufferUdp(DetectEngineThreadCtx *det
         const Frames *frames, const Frame *frame, const int list_id, const uint32_t idx,
         const bool first)
 {
-    DEBUG_VALIDATE_BUG_ON(frame->rel_offset >= p->payload_len);
-    if (frame->rel_offset >= p->payload_len)
+    DEBUG_VALIDATE_BUG_ON(frame->offset >= p->payload_len);
+    if (frame->offset >= p->payload_len)
         return NULL;
 
-    int frame_len = frame->len != -1 ? frame->len : p->payload_len - frame->rel_offset;
     uint8_t ci_flags = DETECT_CI_FLAGS_START;
-
-    if (frame->rel_offset + frame_len > p->payload_len) {
-        frame_len = p->payload_len - frame->rel_offset;
+    uint32_t frame_len;
+    if (frame->len == -1) {
+        frame_len = p->payload_len - frame->offset;
+    } else {
+        frame_len = (uint32_t)frame->len;
+    }
+    if (frame->offset + frame_len > p->payload_len) {
+        frame_len = p->payload_len - frame->offset;
     } else {
         ci_flags |= DETECT_CI_FLAGS_END;
     }
-    const uint8_t *data = p->payload + frame->rel_offset;
+    const uint8_t *data = p->payload + frame->offset;
     const uint32_t data_len = frame_len;
 
-    SCLogDebug("packet %" PRIu64 " -> frame %p/%" PRIi64 "/%s rel_offset %" PRIi64
+    SCLogDebug("packet %" PRIu64 " -> frame %p/%" PRIi64 "/%s offset %" PRIu64
                " type %u len %" PRIi64,
             p->pcap_cnt, frame, frame->id,
             AppLayerParserGetFrameNameById(p->flow->proto, p->flow->alproto, frame->type),
-            frame->rel_offset, frame->type, frame->len);
+            frame->offset, frame->type, frame->len);
     // PrintRawDataFp(stdout, data, MIN(64,data_len));
 
     InspectionBufferSetupMulti(buffer, transforms, data, data_len);
@@ -200,19 +204,22 @@ struct FrameStreamData {
     const Frame *frame;
     int list_id;
     uint32_t idx;
-    uint64_t frame_data_offset_abs;
-    uint64_t frame_start_offset_abs;
+    uint64_t data_offset;
+    uint64_t frame_offset;
+    /** buffer is set if callback was successful */
+    InspectionBuffer *buffer;
 };
 
 static int FrameStreamDataFunc(
         void *cb_data, const uint8_t *input, const uint32_t input_len, const uint64_t offset)
 {
     struct FrameStreamData *fsd = cb_data;
-    SCLogDebug("fsd %p { det_ct:%p, transforms:%p, frame:%p, list_id:%d, idx:%u, "
-               "frame_data_offset_abs:%" PRIu64 ", frame_start_offset_abs:%" PRIu64
+    SCLogDebug("fsd %p { det_ctx:%p, transforms:%p, frame:%p, list_id:%d, idx:%u, "
+               "data_offset:%" PRIu64 ", frame_offset:%" PRIu64
                " }, input: %p, input_len:%u, offset:%" PRIu64,
             fsd, fsd->det_ctx, fsd->transforms, fsd->frame, fsd->list_id, fsd->idx,
-            fsd->frame_data_offset_abs, fsd->frame_start_offset_abs, input, input_len, offset);
+            fsd->data_offset, fsd->frame_offset, input, input_len, offset);
+    // PrintRawDataFp(stdout, input, input_len);
 
     InspectionBuffer *buffer =
             InspectionBufferMultipleForListGet(fsd->det_ctx, fsd->list_id, fsd->idx);
@@ -220,57 +227,76 @@ static int FrameStreamDataFunc(
     SCLogDebug("buffer %p", buffer);
 
     const Frame *frame = fsd->frame;
-    SCLogDebug("frame rel_offset:%" PRIi64, frame->rel_offset);
+    SCLogDebug("frame offset:%" PRIu64, frame->offset);
     const uint8_t *data = input;
     uint8_t ci_flags = 0;
     uint32_t data_len;
-    if (fsd->frame_start_offset_abs == offset) {
+
+    /* fo: frame offset; offset relative to start of the frame */
+    uint64_t fo_inspect_offset = 0;
+
+    if (frame->offset == 0 && offset == 0) {
         ci_flags |= DETECT_CI_FLAGS_START;
         SCLogDebug("have frame data start");
 
         if (frame->len >= 0) {
             data_len = MIN(input_len, frame->len);
-        } else {
-            data_len = input_len;
-        }
-
-        if (data_len == frame->len) {
-            ci_flags |= DETECT_CI_FLAGS_END;
-            SCLogDebug("have frame data end");
-        }
-    } else {
-        BUG_ON(offset < fsd->frame_data_offset_abs);
-
-        uint64_t frame_delta = offset - fsd->frame_start_offset_abs;
-        uint64_t request_delta =
-                offset -
-                fsd->frame_data_offset_abs; // diff between what we requested and what we got
-        BUG_ON(request_delta > frame_delta);
-
-        if (frame->len >= 0) {
-            if (frame_delta >= (uint64_t)frame->len) {
-                SCLogDebug("data entirely past frame");
-                return 1;
-            }
-            uint32_t adjusted_frame_len = (uint32_t)((uint64_t)frame->len - frame_delta);
-            SCLogDebug("frame len after applying offset %" PRIu64 ": %u", frame_delta,
-                    adjusted_frame_len);
-
-            data_len = MIN(adjusted_frame_len, input_len);
-            SCLogDebug("usable data len for frame: %u", data_len);
-
-            if ((uint64_t)data_len + frame_delta == (uint64_t)frame->len) {
+            if (data_len == frame->len) {
                 ci_flags |= DETECT_CI_FLAGS_END;
                 SCLogDebug("have frame data end");
             }
         } else {
             data_len = input_len;
         }
+    } else {
+        const uint64_t so_frame_inspect_offset = frame->inspect_progress + frame->offset;
+        const uint64_t so_inspect_offset = MAX(offset, so_frame_inspect_offset);
+        fo_inspect_offset = so_inspect_offset - frame->offset;
+
+        if (frame->offset >= offset) {
+            ci_flags |= DETECT_CI_FLAGS_START;
+            SCLogDebug("have frame data start");
+        }
+        if (frame->len >= 0) {
+            if (fo_inspect_offset >= (uint64_t)frame->len) {
+                SCLogDebug("data entirely past frame (%" PRIu64 " > %" PRIi64 ")",
+                        fo_inspect_offset, frame->len);
+                return 1;
+            }
+
+            /* so: relative to start of stream */
+            const uint64_t so_frame_offset = frame->offset;
+            const uint64_t so_frame_re = so_frame_offset + (uint64_t)frame->len;
+            const uint64_t so_input_re = offset + input_len;
+
+            /* in: relative to start of input data */
+            BUG_ON(so_inspect_offset < offset);
+            const uint32_t in_data_offset = so_inspect_offset - offset;
+            data += in_data_offset;
+
+            uint32_t in_data_excess = 0;
+            if (so_input_re >= so_frame_re) {
+                ci_flags |= DETECT_CI_FLAGS_END;
+                SCLogDebug("have frame data end");
+                in_data_excess = so_input_re - so_frame_re;
+            }
+            data_len = input_len - in_data_offset - in_data_excess;
+        } else {
+            /* in: relative to start of input data */
+            BUG_ON(so_inspect_offset < offset);
+            const uint32_t in_data_offset = so_inspect_offset - offset;
+            data += in_data_offset;
+            data_len = input_len - in_data_offset;
+        }
     }
     // PrintRawDataFp(stdout, data, data_len);
     InspectionBufferSetupMulti(buffer, fsd->transforms, data, data_len);
-    buffer->inspect_offset = frame->rel_offset < 0 ? -1 * frame->rel_offset : 0; // TODO review/test
+    SCLogDebug("inspect_offset %" PRIu64, fo_inspect_offset);
+    buffer->inspect_offset = fo_inspect_offset;
     buffer->flags = ci_flags;
+    fsd->buffer = buffer;
+    fsd->det_ctx->frame_inspect_progress =
+            MAX(fo_inspect_offset + data_len, fsd->det_ctx->frame_inspect_progress);
     return 1; // for now only the first chunk
 }
 
@@ -301,55 +327,51 @@ InspectionBuffer *DetectFrame2InspectBuffer(DetectEngineThreadCtx *det_ctx,
         stream = &ssn->server;
     }
 
-    /*
-        stream:   [s                                           ]
-        frame:          [r               ]
-        progress:        |>p
-            rel_offset: 10, len 100
-            progress: 20
-            avail: 90 (complete)
+    SCLogDebug("frame %" PRIi64 ", len %" PRIi64 ", offset %" PRIu64, frame->id, frame->len,
+            frame->offset);
 
-        stream:   [s            ]
-        frame:          [r               ]
-        progress:        |>p
-            stream: 0, len 59
-            rel_offset: 10, len 100
-            progress: 20
-            avail: 30 (incomplete)
-
-        stream:          [s                                           ]
-        frame:        [r               ]
-        progress:              |>p
-            stream: 0, len 200
-            rel_offset: -30, len 100
-            progress: 20
-            avail: 50 (complete)
-     */
-
-    SCLogDebug("frame %" PRIi64 ", len %" PRIi64 ", rel_offset %" PRIi64, frame->id, frame->len,
-            frame->rel_offset);
-
-    uint64_t offset = STREAM_BASE_OFFSET(stream);
-    if (frame->rel_offset > 0) {
-        offset += (uint64_t)frame->rel_offset;
-    }
-    const int64_t frame_start_abs_offset = frame->rel_offset + (int64_t)STREAM_BASE_OFFSET(stream);
-    BUG_ON(frame_start_abs_offset < 0);
-
+    const uint64_t frame_offset = frame->offset;
     const bool eof = ssn->state == TCP_CLOSED || PKT_IS_PSEUDOPKT(p);
-
     const uint64_t usable = StreamTcpGetUsable(stream, eof);
-    if (usable <= offset)
+    if (usable <= frame_offset)
         return NULL;
 
-    struct FrameStreamData fsd = { det_ctx, transforms, frame, list_id, idx, offset,
-        (uint64_t)frame_start_abs_offset };
-    StreamReassembleForFrame(ssn, stream, FrameStreamDataFunc, &fsd, offset, eof);
-    SCLogDebug("offset %" PRIu64, offset);
+    uint64_t want = frame->inspect_progress;
+    if (frame->len == -1) {
+        if (eof) {
+            want = usable;
+        } else {
+            want += 2500;
+        }
+    } else {
+        /* don't have the full frame yet */
+        if (frame->offset + frame->len > usable) {
+            want += 2500;
+        } else {
+            want = frame->offset + frame->len;
+        }
+    }
 
-    InspectionBuffer *ret = InspectionBufferMultipleForListGet(det_ctx, list_id, idx);
-    SCLogDebug("ret %p", ret);
-    return ret;
+    const uint64_t have = usable;
+    if (have < want) {
+        SCLogDebug("wanted %" PRIu64 " bytes, got %" PRIu64, want, have);
+        return NULL;
+    }
+
+    const uint64_t available_data = usable - STREAM_BASE_OFFSET(stream);
+    SCLogDebug("check inspection for having 2500 bytes: %" PRIu64, available_data);
+    if (!eof && available_data < 2500 && (frame->len < 0 || frame->len > (int64_t)available_data)) {
+        SCLogDebug("skip inspection until we have 2500 bytes (have %" PRIu64 ")", available_data);
+        return NULL;
+    }
+
+    const uint64_t offset = MAX(STREAM_BASE_OFFSET(stream), frame->offset);
+
+    struct FrameStreamData fsd = { det_ctx, transforms, frame, list_id, idx,
+        STREAM_BASE_OFFSET(stream), MAX(frame->inspect_progress, frame->offset), NULL };
+    StreamReassembleForFrame(ssn, stream, FrameStreamDataFunc, &fsd, offset, eof);
+
+    return fsd.buffer;
 }
 
 /**
@@ -394,9 +416,9 @@ int DetectEngineInspectFrameBufferGeneric(DetectEngineThreadCtx *det_ctx,
     det_ctx->inspection_recursion_counter = 0;
 #ifdef DEBUG
     const uint8_t ci_flags = buffer->flags;
-    SCLogDebug("frame %p rel_offset %" PRIi64 " type %u len %" PRIi64
+    SCLogDebug("frame %p offset %" PRIu64 " type %u len %" PRIi64
                " ci_flags %02x (start:%s, end:%s)",
-            frame, frame->rel_offset, frame->type, frame->len, ci_flags,
+            frame, frame->offset, frame->type, frame->len, ci_flags,
             (ci_flags & DETECT_CI_FLAGS_START) ? "true" : "false",
             (ci_flags & DETECT_CI_FLAGS_END) ? "true" : "false");
     SCLogDebug("buffer %p offset %" PRIu64 " len %u ci_flags %02x (start:%s, end:%s)", buffer,

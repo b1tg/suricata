@@ -40,6 +40,8 @@
 #define APP_LAYER_PARSER_EOF_TC                BIT_U16(6)
 #define APP_LAYER_PARSER_TRUNC_TS              BIT_U16(7)
 #define APP_LAYER_PARSER_TRUNC_TC              BIT_U16(8)
+#define APP_LAYER_PARSER_SFRAME_TS             BIT_U16(9)
+#define APP_LAYER_PARSER_SFRAME_TC             BIT_U16(10)
 
 /* Flags for AppLayerParserProtoCtx. */
 #define APP_LAYER_PARSER_OPT_ACCEPT_GAPS        BIT_U32(0)
@@ -177,8 +179,8 @@ void AppLayerParserRegisterLocalStorageFunc(uint8_t ipproto, AppProto proto,
         void *(*LocalStorageAlloc)(void), void (*LocalStorageFree)(void *));
 // void AppLayerParserRegisterGetEventsFunc(uint8_t ipproto, AppProto proto,
 //     AppLayerDecoderEvents *(*StateGetEvents)(void *) __attribute__((nonnull)));
-void AppLayerParserRegisterGetTxFilesFunc(
-        uint8_t ipproto, AppProto alproto, FileContainer *(*GetTxFiles)(void *, uint8_t));
+void AppLayerParserRegisterGetTxFilesFunc(uint8_t ipproto, AppProto alproto,
+        AppLayerGetFileState (*GetTxFiles)(void *, void *, uint8_t));
 void AppLayerParserRegisterLoggerFuncs(uint8_t ipproto, AppProto alproto,
                          LoggerId (*StateGetTxLogged)(void *, void *),
                          void (*StateSetTxLogged)(void *, void *, LoggerId));
@@ -241,7 +243,8 @@ void AppLayerParserSetTransactionInspectId(const Flow *f, AppLayerParserState *p
 AppLayerDecoderEvents *AppLayerParserGetDecoderEvents(AppLayerParserState *pstate);
 void AppLayerParserSetDecoderEvents(AppLayerParserState *pstate, AppLayerDecoderEvents *devents);
 AppLayerDecoderEvents *AppLayerParserGetEventsByTx(uint8_t ipproto, AppProto alproto, void *tx);
-FileContainer *AppLayerParserGetTxFiles(const Flow *f, void *tx, const uint8_t direction);
+AppLayerGetFileState AppLayerParserGetTxFiles(
+        const Flow *f, void *state, void *tx, const uint8_t direction);
 int AppLayerParserGetStateProgress(uint8_t ipproto, AppProto alproto,
                         void *alstate, uint8_t direction);
 uint64_t AppLayerParserGetTxCnt(const Flow *, void *alstate);
