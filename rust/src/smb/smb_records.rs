@@ -45,6 +45,12 @@ pub fn smb_get_unicode_string(blob: &[u8]) -> IResult<&[u8], Vec<u8>, SmbError>
     Err(Err::Error(SmbError::BadEncoding))
 }
 
+// #[test]
+// fn test_smb_get_unicode_string() {
+//     let result = smb_get_unicode_string(&[0]);
+//     dbg!(&result);
+// }
+
 // parse an ASCII string that is null terminated
 pub fn smb_get_ascii_string(i: &[u8]) -> IResult<&[u8], Vec<u8>, SmbError> {
     let (i, s) = take_until_and_consume(b"\x00")(i)?;

@@ -246,6 +246,11 @@ pub fn parse_smb_connect_tree_andx_record<'a>(i: &'a[u8], r: &SmbRecord)
    Ok((i, record))
 }
 
+#[test]
+fn test_todo_parse_smb_connect_tree_andx_record() {
+
+}
+
 #[derive(Debug,PartialEq, Eq)]
 pub struct SmbRecordTransRequest<'a> {
     pub params: SmbRecordTransRequestParams,
@@ -793,6 +798,16 @@ pub fn parse_smb_version(i: &[u8]) -> IResult<&[u8], SmbVersion> {
     Ok((i, version))
 }
 
+#[test]
+fn test_parse_smb_version() {
+    let smb = parse_smb_version(b"\xff\x53\x4d\x42").unwrap().1;
+    assert_eq!(smb, SmbVersion { version: 0xff});
+    let smb2 = parse_smb_version(b"\xfe\x53\x4d\x42").unwrap().1;
+    assert_eq!(smb2, SmbVersion { version: 0xfe});
+    let smb3 = parse_smb_version(b"\xfd\x53\x4d\x42").unwrap().1;
+    assert_eq!(smb3, SmbVersion { version: 0xfd});
+}
+
 #[derive(Debug,PartialEq, Eq)]
 pub struct SmbRecord<'a> {
     pub command: u8,
@@ -861,4 +876,35 @@ pub fn parse_smb_record(i: &[u8]) -> IResult<&[u8], SmbRecord> {
         data,
     };
     Ok((i, record))
+}
+
+use crate::smb::smb1::SMB1_COMMAND_NEGOTIATE_PROTOCOL;
+#[test]
+pub fn test_parse_smb_record() {
+    let data = hex::decode("ff534d4272000000001853c8000000000000000000000000fffffffe00000000007800025043204e4554574f524b2050524f4752414d20312e3000024c414e4d414e312e30000257696e646f777320666f7220576f726b67726f75707320332e316100024c4d312e325830303200024c414e4d414e322e3100024e54204c4d20302e31320002534d4220322e3030320002534d4220322e3f3f3f00").unwrap();
+    let result = parse_smb_record(&data);
+	assert_eq!(result.is_ok(), true);
+    let record = result.unwrap().1;
+	assert_eq!(record.command, SMB1_COMMAND_NEGOTIATE_PROTOCOL);
+	assert_eq!(record.is_dos_error, false);
+	assert_eq!(record.nt_status, 0);
+	assert_eq!(record.flags, 24);
+	assert_eq!(record.flags2, 51283);
+	assert_eq!(record.tree_id, 65535);
+	assert_eq!(record.user_id, 0);
+	assert_eq!(record.multiplex_id, 0);
+	assert_eq!(record.process_id, 65279);
+	assert_eq!(record.ssn_id, 0);
+	let pr = parse_smb1_negotiate_protocol_record(record.data).unwrap().1;
+	let dialects:Vec<&str> = pr.dialects.iter().map(|d|std::str::from_utf8(&d[1..]).unwrap()).collect();
+	assert_eq!(dialects, [
+		"PC NETWORK PROGRAM 1.0",
+		"LANMAN1.0",
+		"Windows for Workgroups 3.1a",
+		"LM1.2X002",
+		"LANMAN2.1",
+		"NT LM 0.12",
+		"SMB 2.002",
+		"SMB 2.???",
+	]);
 }

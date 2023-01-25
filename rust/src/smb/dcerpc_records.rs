@@ -45,6 +45,7 @@ pub fn parse_dcerpc_response_record(i:&[u8], frag_len: u16 )
     Ok((i, record))
 }
 
+
 #[derive(Debug,PartialEq, Eq)]
 pub struct DceRpcRequestRecord<'a> {
     pub opnum: u16,
@@ -69,7 +70,7 @@ pub fn parse_dcerpc_request_record(i:&[u8], frag_len: u16, little: bool)
     Ok((i, record))
 }
 
-#[derive(Debug,PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DceRpcBindIface<'a> {
     pub iface: &'a[u8],
     pub ver: u16,
@@ -142,7 +143,7 @@ pub fn parse_dcerpc_bind_record_big(i: &[u8]) -> IResult<&[u8], DceRpcBindRecord
     Ok((i, record))
 }
 
-#[derive(Debug,PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DceRpcBindAckResult<'a> {
     pub ack_result: u16,
     pub ack_reason: u16,
@@ -231,6 +232,7 @@ pub fn parse_dcerpc_record(i: &[u8]) -> IResult<&[u8], DceRpcRecord> {
     let (i, frag_len) = u16(endian)(i)?;
     let (i, _auth) = u16(endian)(i)?;
     let (i, call_id) = u32(endian)(i)?;
+	// TODO: 还有两个field未解析，排查是否有问题
     let (i, data) = rest(i)?;
     let record = DceRpcRecord {
         version_major,
@@ -244,4 +246,404 @@ pub fn parse_dcerpc_record(i: &[u8]) -> IResult<&[u8], DceRpcRecord> {
         data,
     };
     Ok((i, record))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+	use crate::dcerpc::dcerpc::DCERPC_TYPE_BINDACK;
+	#[test]
+	fn test_parse_dcerpc_bindack_record() {
+        let data = hex::decode("05000c03100000007400000002000000b810b810d80a00000c005c504950455c6174737663000055030000000200020000000000000000000000000000000000000000000000000033057171babe37498319b5dbef9ccc3601000000030003000000000000000000000000000000000000000000").unwrap();
+        let result = parse_dcerpc_record(&data);
+        assert_eq!(result.is_ok(), true);
+        let record = result.unwrap().1;
+		assert_eq!(record.packet_type, DCERPC_TYPE_BINDACK);
+        let result = parse_dcerpc_bindack_record(&record.data);
+		// dbg!(&result);
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap().1, DceRpcBindAckRecord {
+            num_results: 3,
+            results: [
+                DceRpcBindAckResult {
+                    ack_result: 2,
+                    ack_reason: 2,
+                    transfer_syntax: &[
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                    syntax_version: 0,
+                },
+                DceRpcBindAckResult {
+                    ack_result: 0,
+                    ack_reason: 0,
+                    transfer_syntax: &[
+                        51,
+                        5,
+                        113,
+                        113,
+                        186,
+                        190,
+                        55,
+                        73,
+                        131,
+                        25,
+                        181,
+                        219,
+                        239,
+                        156,
+                        204,
+                        54,
+                    ],
+                    syntax_version: 1,
+                },
+                DceRpcBindAckResult {
+                    ack_result: 3,
+                    ack_reason: 3,
+                    transfer_syntax: &[
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                    syntax_version: 0,
+                },
+            ].to_vec(),
+        });
+	}
+
+	#[test]
+	fn test_parse_dcerpc_bind_record() {
+		// krb5.pcap no: 283
+		// 20171220_smb_at_schedule.pcap
+		// https://redmine.openinfosecfoundation.org/issues/3109
+        let data = hex::decode("05000b0310000000a000000002000000b810b8100000000003000000000001008206f71f510ae830076d740be8cee98b01000000045d888aeb1cc9119fe808002b10486002000000010001008206f71f510ae830076d740be8cee98b0100000033057171babe37498319b5dbef9ccc3601000000020001008206f71f510ae830076d740be8cee98b010000002c1cb76c12984045030000000000000001000000").unwrap();
+        let result = parse_dcerpc_record(&data);
+        assert_eq!(result.is_ok(), true);
+        let record = result.unwrap().1;
+		assert_eq!(record.frag_len, 160);
+        let result = parse_dcerpc_bind_record(&record.data);
+		// dbg!(&result);
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap().1, DceRpcBindRecord {
+            num_ctx_items: 3,
+            ifaces: [
+                DceRpcBindIface {
+                    iface: &[
+                        130,
+                        6,
+                        247,
+                        31,
+                        81,
+                        10,
+                        232,
+                        48,
+                        7,
+                        109,
+                        116,
+                        11,
+                        232,
+                        206,
+                        233,
+                        139,
+                    ],
+                    ver: 1,
+                    ver_min: 0,
+                },
+                DceRpcBindIface {
+                    iface: &[
+                        130,
+                        6,
+                        247,
+                        31,
+                        81,
+                        10,
+                        232,
+                        48,
+                        7,
+                        109,
+                        116,
+                        11,
+                        232,
+                        206,
+                        233,
+                        139,
+                    ],
+                    ver: 1,
+                    ver_min: 0,
+                },
+                DceRpcBindIface {
+                    iface: &[
+                        130,
+                        6,
+                        247,
+                        31,
+                        81,
+                        10,
+                        232,
+                        48,
+                        7,
+                        109,
+                        116,
+                        11,
+                        232,
+                        206,
+                        233,
+                        139,
+                    ],
+                    ver: 1,
+                    ver_min: 0,
+                },
+            ].to_vec(),
+        });
+
+	}
+
+	#[test]
+	fn test_parse_dcerpc_request_record() {
+		use crate::dcerpc::dcerpc::DCERPC_TYPE_REQUEST;
+		// krb5.pcap dcerpc & no: 262
+		// https://www.cloudshark.org/captures/fa35bc16bbb0?filter=frame%20and%20raw%20and%20ip%20and%20tcp%20and%20nbss%20and%20smb%20and%20smb_pipe%20and%20dcerpc%20and%20samr
+        let data = hex::decode("05000003100000004c00000007000000340000000000070000000000190fb5f979a4cc4384dbc1cbc4ecd8ab1102000004000000010400000000000515000000cf525a5834770dc31056d8ac").unwrap();
+        let result = parse_dcerpc_record(&data);
+        assert_eq!(result.is_ok(), true);
+        let record = result.unwrap().1;
+		assert_eq!(record.packet_type, DCERPC_TYPE_REQUEST);
+        let result = parse_dcerpc_request_record(&record.data, record.frag_len, record.little_endian );
+		// dbg!(&result);
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap().1, DceRpcRequestRecord {
+            opnum: 7,
+            context_id: 0,
+            data: &[
+                0,
+                0,
+                0,
+                0,
+                25,
+                15,
+                181,
+                249,
+                121,
+                164,
+                204,
+                67,
+                132,
+                219,
+                193,
+                203,
+                196,
+                236,
+                216,
+                171,
+                17,
+                2,
+                0,
+                0,
+                4,
+                0,
+                0,
+                0,
+                1,
+                4,
+                0,
+                0,
+                0,
+                0,
+                0,
+                5,
+                21,
+                0,
+                0,
+                0,
+                207,
+                82,
+                90,
+                88,
+                52,
+                119,
+                13,
+                195,
+                16,
+                86,
+                216,
+                172,
+            ],
+        });
+
+	}
+
+	#[test]
+	fn test_parse_dcerpc_response_record() {
+		// TOOD: 多了8个字节
+		// krb5.pcap no: 283
+		// https://www.cloudshark.org/captures/fa35bc16bbb0?filter=frame%20and%20raw%20and%20ip%20and%20tcp%20and%20nbss%20and%20smb%20and%20smb_pipe%20and%20dcerpc%20and%20samr
+        let data = hex::decode("05000203100000003c0000000a0000002400000000000000010000000400020001000000510400000100000008000200010000000100000000000000").unwrap();
+        let result = parse_dcerpc_record(&data);
+        assert_eq!(result.is_ok(), true);
+        let record = result.unwrap().1;
+		assert_eq!(record.frag_len, 60);
+        let result = parse_dcerpc_response_record(&record.data, record.frag_len);
+		// dbg!(result);
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap().1, DceRpcResponseRecord {
+            data: &[
+                1,
+                0,
+                0,
+                0,
+                4,
+                0,
+                2,
+                0,
+                1,
+                0,
+                0,
+                0,
+                81,
+                4,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                8,
+                0,
+                2,
+                0,
+                1,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        });
+
+
+	}
+    #[test]
+    fn test_parse_dcerpc_record() {
+        let data = hex::decode("05000003100000004c00000007000000340000000000070000000000190fb5f979a4cc4384dbc1cbc4ecd8ab1102000004000000010400000000000515000000cf525a5834770dc31056d8ac").unwrap();
+        let result = parse_dcerpc_record(&data);
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(
+            result.unwrap().1,
+            DceRpcRecord {
+                // version_major,
+                // version_minor,
+                // packet_type,
+                // first_frag: packet_flags.2 == 1,
+                // last_frag: packet_flags.1 == 1,
+                // frag_len,
+                // little_endian: data_rep.1 == 1,
+                // call_id,
+				version_major: 5,
+				version_minor: 0,
+				first_frag: true,
+				last_frag: true,
+				frag_len: 76,
+				little_endian: true,
+				packet_type: 0,
+				call_id: 7,
+				data: &[
+					52,
+					0,
+					0,
+					0,
+					0,
+					0,
+					7,
+					0,
+					0,
+					0,
+					0,
+					0,
+					25,
+					15,
+					181,
+					249,
+					121,
+					164,
+					204,
+					67,
+					132,
+					219,
+					193,
+					203,
+					196,
+					236,
+					216,
+					171,
+					17,
+					2,
+					0,
+					0,
+					4,
+					0,
+					0,
+					0,
+					1,
+					4,
+					0,
+					0,
+					0,
+					0,
+					0,
+					5,
+					21,
+					0,
+					0,
+					0,
+					207,
+					82,
+					90,
+					88,
+					52,
+					119,
+					13,
+					195,
+					16,
+					86,
+					216,
+					172,
+				],
+
+            }
+        );
+    }
 }

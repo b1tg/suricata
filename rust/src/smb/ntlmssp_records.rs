@@ -159,8 +159,19 @@ pub fn parse_ntlmssp(i: &[u8]) -> IResult<&[u8], NTLMSSPRecord> {
 mod tests {
     use super::*;
     use nom7::Err;
+
+    #[test]
+    fn test_parse_ntlmssp() {
+        let data = hex::decode("4e544c4d53535000020000001e001e003800000015828ae20e71b47da48a95b9000000000000000098009800560000000a005a290000000f4400450053004b0054004f0050002d00560031004600410030005500510002001e004400450053004b0054004f0050002d00560031004600410030005500510001001e004400450053004b0054004f0050002d00560031004600410030005500510004001e004400450053004b0054004f0050002d00560031004600410030005500510003001e004400450053004b0054004f0050002d0056003100460041003000550051000700080078a7ed218527d20100000000").unwrap();
+        let result = parse_ntlmssp(&data);
+        assert_eq!(result.is_ok(), true);
+        // TODO: make msg_type a enum?
+        assert_eq!(result.unwrap().1.msg_type, 2); // NTLMSSP_CHALLENGE = 2
+    }
+
     #[test]
     fn test_parse_auth_nego_flags() {
+        // ntlmssp.negotiateflags
         let blob = [0x15, 0x82, 0x88, 0xe2];
         let result = parse_ntlm_auth_nego_flags(&blob);
         match result {
